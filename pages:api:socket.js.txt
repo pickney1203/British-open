@@ -1,0 +1,91 @@
+import { Server } from 'socket.io';
+import { MongoClient } from 'mongodb';
+
+const uri = process.env.MONGODB_URI;
+const client = new MongoClient(uri);
+let io;
+
+export default async function handler(req, res) {
+  if (res.socket.server.io) {
+    res.status(200).end();
+    return;
+  }
+
+  io = new Server(res.socket.server, {
+    path: '/api/socket',
+    cors: { origin: '*' },
+  });
+  res.socket.server.io = io;
+
+  io.on('connection', (socket) => {
+    console.log('User connected:', socket.id);
+
+    socket.on('joinAuction', async ({ userId, auctionId }) => {
+      socket.join(auctionId);
+      await updateAuctionStatus(auctionId);
+    });
+
+    socket.on('placeBid', async ({ userId, auctionId, golferId, amount }) => {
+      try {
+        await client.connect();
+        const db = client.db('golf_auction');
+        const users = db.collection('users');
+        const bids = db.collection('bids');
+        const auctions = db.collection('auctions');
+
+        const user = await users.findOne({ _id: userId });
+        if (!user || (amount > 0 && user.budget < amount)) {
+          socket.emit('bidError', { message: 'Insufficient budget' });
+          return;
+        }
+
+        await bids.insertOne({ userId, auctionId, golferId, amount, timestamp: new Date() });
+        await users.updateOne({ _id: userId }, { $inc: { budget: -amount } });
+
+        const highestBid = await bids.find({ auctionId, golferId }).sort({ amount: -1 }).limit(1).toArray();
+        io.to(auctionId).emit('bidUpdate', { golferId, highestBid: highestBid[0] });
+
+        if (amount === 0 || highestBid[0].amount === 0) {
+          await auctions.updateOne({ _id: auctionId }, { $set: { status: 'ended', winner: userId } });
+          io.to(auctionId).emit('auctionEnded', { winner: userId, golferId });
+        }
+      } catch (error) {
+        console.error('Bid error:', error);
+        socket.emit('bidError', { message: 'Error placing bid' });
+      } finally {
+        await client.close();
+      }
+    });
+
+    socket.on('selectGolfer', async ({ auctionId, golferId, userId }) => {
+      try {
+        await client.connect();
+        const db = client.db('golf_auction');
+        const auctions = db.collection('auctions');
+        await auctions.updateOne({ _id: auctionId }, { $set: { currentGolfer: golferId, status: 'active' } });
+        io.to(auctionId).emit('golferSelected', { golferId });
+      } catch (error) {
+        console.error('Golfer selection error:', error);
+        socket.emit('error', { message: 'Error selecting golfer' });
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
+  res.status(200).end();
+}
+
+async function updateAuctionStatus(auctionId) {
+  try {
+    await client.connect();
+    const db = client.db('golf_auction');
+    const auction = db.collection('auctions');
+    const auctionData = await auction.findOne({ _id: auctionId });
+    io.to(auctionId).emit('auctionStatus', auctionData);
+  } catch (error) {
+    console.error('Error updating auction status:', error);
+  } finally {
+    await client.close();
+  }
+}

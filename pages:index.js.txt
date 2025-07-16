@@ -1,0 +1,128 @@
+import { useEffect, useState } from 'react';
+import io from 'socket.io-client';
+import axios from 'axios';
+
+let socket;
+
+export default function Home() {
+  const [userId, setUserId] = useState('');
+  const [auctionId] = useState('auction1');
+  const [budget, setBudget] = useState(100);
+  const [currentGolfer, setCurrentGolfer] = useState(null);
+  const [highestBid, setHighestBid] = useState(null);
+  const [bidAmount, setBidAmount] = useState(0);
+  const [golfers, setGolfers] = useState([]);
+  const [isWinner, setIsWinner] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!userId) return;
+
+    socket = io(process.env.NEXT_PUBLIC_API_URL, { path: '/api/socket' });
+    socket.on('connect', () => {
+      console.log('Connected to socket');
+      socket.emit('joinAuction', { userId, auctionId });
+    });
+
+    socket.on('bidUpdate', ({ golferId, highestBid }) => {
+      setHighestBid(highestBid);
+    });
+
+    socket.on('bidError', ({ message }) => {
+      setError(message);
+    });
+
+    socket.on('auctionEnded', ({ winner, golferId }) => {
+      if (winner === userId) {
+        setIsWinner(true);
+      }
+    });
+
+    socket.on('golferSelected', ({ golferId }) => {
+      setCurrentGolfer(golfers.find((g) => g.id === golferId));
+      setHighestBid(null);
+      setIsWinner(false);
+    });
+
+    socket.on('auctionStatus', (auction) => {
+      if (auction && auction.currentGolfer) {
+        setCurrentGolfer(golfers.find((g) => g.id === auction.currentGolfer));
+      }
+    });
+
+    axios.get('/api/golfers').then((res) => setGolfers(res.data)).catch(() => setError('Failed to load golfers'));
+
+    return () => socket.disconnect();
+  }, [userId, auctionId, golfers]);
+
+  const handleBid = (increment) => {
+    const amount = bidAmount + increment;
+    if ((amount <= budget && amount > 0) || amount === 0) {
+      socket.emit('placeBid', { userId, auctionId, golferId: currentGolfer.id, amount });
+      setBidAmount(0);
+      setBudget(budget - amount);
+      setError('');
+    } else {
+      setError('Insufficient budget');
+    }
+  };
+
+  const handleSelectGolfer = (golferId) => {
+    socket.emit('selectGolfer', { auctionId, golferId, userId });
+    setIsWinner(false);
+  };
+
+  return (
+    <div style={{ padding: '20px' }}>
+      <h1>Golf Auction Draft</h1>
+      {!userId ? (
+        <div>
+          <input
+            type="text"
+            placeholder="Enter User ID"
+            onChange={(e) => setUserId(e.target.value)}
+            style={{ marginRight: '10px' }}
+          />
+        </div>
+      ) : (
+        <>
+          <p>Budget: ${budget}</p>
+          {error && <p style={{ color: 'red' }}>{error}</p>}
+          {currentGolfer && (
+            <div>
+              <h2>Current Golfer: {currentGolfer.name}</h2>
+              <p>Highest Bid: {highestBid ? `$${highestBid.amount} by User ${highestBid.userId}` : 'No bids yet'}</p>
+              <input
+                type="number"
+                value={bidAmount}
+                onChange={(e) => setBidAmount(Number(e.target.value))}
+                placeholder="Enter bid amount"
+                disabled={budget === 0 && bidAmount !== 0}
+              />
+              <button onClick={() => handleBid(1)} disabled={budget === 0 && bidAmount !== 0}>
+                +$1
+              </button>
+              <button onClick={() => handleBid(5)} disabled={budget < 5}>
+                +$5
+              </button>
+              <button onClick={() => handleBid(10)} disabled={budget < 10}>
+                +$10
+              </button>
+              {budget === 0 && <button onClick={() => handleBid(0)}>Bid $0</button>}
+            </div>
+          )}
+          {isWinner && (
+            <div>
+              <h2>You won the bid! Select the next golfer:</h2>
+              {golfers.map((golfer) => (
+                <button key={golfer.id} onClick={() => handleSelectGolfer(golfer.id)}>
+                  {golfer.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
